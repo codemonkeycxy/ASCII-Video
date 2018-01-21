@@ -23,7 +23,7 @@ program
   .description(
     'Takes an input video, converts it into ASCII frames, and writes it to an output file.'
   )
-  .action((video, outputTo) => {
+  .action(async (video, outputTo) => {
     if (!_.endsWith(outputTo, '.yaml')) {
       return console.log(errMsg('The outputfile must be a yaml file.'))
     }
@@ -65,7 +65,7 @@ program
       })
       .reverse()
 
-    createSprites(files, outputTo, 0, [])
+    await createSprites(files, outputTo)
   })
 
 program
@@ -114,39 +114,44 @@ function delay(time) {
 /*=====================================================
                         HELPERS
 ======================================================*/
-function createSprites(files, outputTo, idx, sprites) {
-  if (idx === files.length) {
-    appendToFile(outputTo, sprites, true)
-    // clean up temp directory after the last chunk of sprites is written
-    shell.exec(`rm -rf ${TMP_DIR_PATH}`)
-    console.log(infoMsg(`File written to ${outputTo}`))
-  } else {
-    imageToAscii(
-      TMP_DIR_PATH + files[idx],
-      {
-        image_type: 'jpg',
-      },
-      (err, converted) => {
-        if (err) {
-          console.log(warningMsg(err))
-        } else {
-          sprites.push(converted + '\nzzzzzzzzzzzzzzzzzzzzzzz')
+async function createSprites(files, outputTo) {
+  let sprites = []
 
-          // write to disk before sprites array gets too large
-          if (sprites.length > 500) {
-            appendToFile(outputTo, sprites)
-            sprites = []
-          }
+  for(let idx in files) {
+    try {
+      const converted = await imageToAsciiSync(TMP_DIR_PATH + files[idx], {image_type: 'jpg'})
+      sprites.push(converted + '\nzzzzzzzzzzzzzzzzzzzzzzz')
 
-          logUpdate(
-            `Creating sprites: ${Math.round(idx / files.length * 100)}%`
-          )
-        }
-
-        createSprites(files, outputTo, idx + 1, sprites)
+      // write to disk before sprites array gets too large
+      if (sprites.length > 500) {
+        appendToFile(outputTo, sprites)
+        sprites = []
       }
-    )
+
+      logUpdate(
+        `Creating sprites: ${Math.round(idx / files.length * 100)}%`
+      )
+    } catch (err) {
+      console.log(warningMsg(err))
+    }
   }
+
+  appendToFile(outputTo, sprites, true)
+  // clean up temp directory after the last chunk of sprites is written
+  shell.exec(`rm -rf ${TMP_DIR_PATH}`)
+  console.log(infoMsg(`File written to ${outputTo}`))
+}
+
+function imageToAsciiSync(source, options) {
+  return new Promise((resolve, reject) => {
+    imageToAscii(source, options, (err, converted) =>{
+      if (err) {
+        reject(err)
+      } else {
+        resolve(converted)
+      }
+    })
+  })
 }
 
 function appendToFile(outputTo, sprites) {
