@@ -4,19 +4,27 @@
                     IMPORTS / SETUP
 ======================================================*/
 const _ = require('lodash')
+const os = require('os')
 const fs = require('fs')
+const path = require('path');
 const yaml = require('js-yaml')
-const clc = require('cli-color')
 const shell = require('shelljs')
 const program = require('commander')
 const logUpdate = require('log-update')
-const imageToAscii = require('image-to-ascii')
+const fork = require('child_process').fork;
 
-const TMP_DIR_PATH = '/tmp/__sprite_cli_output/'
-const END_OF_FRAME_ID = '\nzzzzzzzzzzzzzzzzzzzzzzz'
-/*=====================================================
-                          MAIN
-======================================================*/
+const {
+  showLoading,
+  errMsg,
+  infoMsg,
+  appendToFile
+} = require('./helpers')
+
+const {
+  TMP_DIR_PATH,
+  END_OF_FRAME_ID
+} = require('./constants')
+
 program
   .version('0.1.2')
   .command('create <input-video> <output-filename>')
@@ -111,88 +119,47 @@ function delay(time) {
   return new Promise(resolve => setTimeout(resolve, time))
 }
 
-/*=====================================================
-                        HELPERS
-======================================================*/
 async function createSprites(files, outputTo) {
-  let sprites = []
+  let spritesProcessed = 0
+  const cpuCount = os.cpus().length
+  const batches = _.chunk(files, cpuCount)
+  const workerPath = path.join(__dirname, 'img-to-ascii-worker.js')
+  const workers = []
 
-  for(let idx in files) {
-    try {
-      const converted = await imageToAsciiSync(TMP_DIR_PATH + files[idx], {image_type: 'jpg'})
-      sprites.push(converted + '\nzzzzzzzzzzzzzzzzzzzzzzz')
-
-      // write to disk before sprites array gets too large
-      if (sprites.length > 500) {
-        appendToFile(outputTo, sprites)
-        sprites = []
-      }
-
-      logUpdate(
-        `Creating sprites: ${Math.round(idx / files.length * 100)}%`
-      )
-    } catch (err) {
-      console.log(warningMsg(err))
-    }
+  for (let i = 0; i < cpuCount; i++) {
+    workers.push(fork(workerPath))
   }
 
-  appendToFile(outputTo, sprites, true)
+  for (let batchId = 0; batchId < batches.length; batchId++) {
+    const batch = batches[batchId]
+    const promises = []
+
+    for (let j = 0; j < batch.length; j++) {
+      const worker = workers[j]
+
+      promises.push(new Promise(resolve => {
+        worker.on('message', result => {
+          resolve(result)
+          worker.removeAllListeners('message')
+        })
+        worker.send(batch[j])
+      }))
+    }
+
+    const sprites = await Promise.all(promises)
+    spritesProcessed += sprites.length
+    appendToFile(outputTo, sprites)
+
+    logUpdate(
+      `Creating sprites: ${Math.round(spritesProcessed / files.length * 100)}%`
+    )
+  }
+
+  for (let workerId = 0; workerId < workers.length; workerId++) {
+    process.kill(workers[workerId].pid)
+  }
+
   // clean up temp directory after the last chunk of sprites is written
   shell.exec(`rm -rf ${TMP_DIR_PATH}`)
   console.log(infoMsg(`File written to ${outputTo}`))
-}
-
-function imageToAsciiSync(source, options) {
-  return new Promise((resolve, reject) => {
-    imageToAscii(source, options, (err, converted) =>{
-      if (err) {
-        reject(err)
-      } else {
-        resolve(converted)
-      }
-    })
-  })
-}
-
-function appendToFile(outputTo, sprites) {
-  const outFile = yaml.safeDump(sprites)
-
-  fs.appendFile(outputTo, outFile, err => {
-    if (err) return console.log(warningMsg(err))
-  })
-}
-
-function showLoading() {
-  const frames = ['-', '\\', '|', '/']
-  let i = 0
-
-  return setInterval(() => {
-    const frame = frames[(i = ++i % frames.length)]
-    logUpdate(`${frame} Converting video to frames ${frame}`)
-  }, 80)
-}
-
-function readFile(pathTo) {
-  return new Promise((resolve, reject) => {
-    fs.readFile(pathTo, (err, data) => {
-      if (!err) return resolve(data)
-      console.log(err)
-      reject(err)
-    })
-  })
-}
-
-function infoMsg(msg) {
-  const infoColor = clc.xterm(33)
-  return infoColor(msg)
-}
-
-function errMsg(msg) {
-  const errColor = clc.xterm(9)
-  return errColor(msg)
-}
-
-function warningMsg(msg) {
-  const warningColor = clc.xterm(214)
-  return warningColor(msg)
 }
